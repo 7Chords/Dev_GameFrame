@@ -10,6 +10,15 @@ using UnityEngine;
 namespace SCFrame.RefData
 {
     /// <summary>
+    /// Excel 文件及其页签信息
+    /// </summary>
+    public class ExcelFileInfo
+    {
+        public string RelativePath;
+        public List<string> SheetNames = new List<string>();
+    }
+
+    /// <summary>
     /// SCFrame中的配表数据导出器
     /// </summary>
     public static class SCExcelExporter
@@ -19,97 +28,205 @@ namespace SCFrame.RefData
         public const int TITLE_START_INDEX = 0;//标题列索引
 
         /// <summary>
-        /// 导出所有的excel表 表在GAME_EXCEL_PATH里
+        /// 获取指定目录下所有可导出的 Excel 文件（相对路径）
         /// </summary>
-        [MenuItem("Excel导出/导出全部的Excel")]
-        public static void ExportAllExcels()
+        public static List<string> GetExcelFileList(string excelFolderPath)
         {
-            bool hasImported = false;
-            DirectoryInfo direction = new DirectoryInfo(GAME_EXCEL_PATH);
+            var result = new List<string>();
+            List<ExcelFileInfo> infos = GetExcelFileInfoList(excelFolderPath);
+            for (int i = 0; i < infos.Count; i++)
+            {
+                result.Add(infos[i].RelativePath);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// 获取 Excel 文件列表及每个文件内的页签名称
+        /// </summary>
+        public static List<ExcelFileInfo> GetExcelFileInfoList(string excelFolderPath)
+        {
+            var result = new List<ExcelFileInfo>();
+            string absoluteRoot = ToAbsolutePath(excelFolderPath);
+
+            if (!Directory.Exists(absoluteRoot))
+            {
+                return result;
+            }
+
+            DirectoryInfo direction = new DirectoryInfo(absoluteRoot);
             FileInfo[] files = direction.GetFiles("*", SearchOption.AllDirectories);
+            int validCount = 0;
 
             for (int i = 0; i < files.Length; i++)
             {
-                //查找excel的后缀
-                if (Path.GetExtension(files[i].FullName) == ".xls" || Path.GetExtension(files[i].FullName) == ".xlsx")
+                string ext = Path.GetExtension(files[i].FullName);
+                if (ext != ".xls" && ext != ".xlsx")
                 {
-                    string excelName = Path.GetFileName(files[i].FullName);
+                    continue;
+                }
 
-                    if (excelName.StartsWith("~$"))
+                if (files[i].Name.StartsWith("~$"))
+                {
+                    continue;
+                }
+
+                validCount++;
+            }
+
+            int current = 0;
+            try
+            {
+                for (int i = 0; i < files.Length; i++)
+                {
+                    string ext = Path.GetExtension(files[i].FullName);
+                    if (ext != ".xls" && ext != ".xlsx")
                     {
                         continue;
                     }
 
-                    ExportExcel(excelName);
+                    if (files[i].Name.StartsWith("~$"))
+                    {
+                        continue;
+                    }
 
-                    hasImported = true;
+                    string relativePath = files[i].FullName.Substring(absoluteRoot.Length).TrimStart('\\', '/').Replace('\\', '/');
+                    EditorUtility.DisplayProgressBar("读取 Excel 页签", relativePath, validCount > 0 ? (float)current / validCount : 0f);
+                    current++;
+
+                    var info = new ExcelFileInfo { RelativePath = relativePath };
+
+                    try
+                    {
+                        IWorkbook workbook = CreatWrokbook(files[i].FullName);
+                        for (int s = 0; s < workbook.NumberOfSheets; s++)
+                        {
+                            info.SheetNames.Add(workbook.GetSheetName(s));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError($"读取 Excel 页签失败 [{relativePath}]: {ex.Message}");
+                    }
+
+                    result.Add(info);
                 }
             }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
 
-            if(!hasImported)
-            {
-                Debug.LogError("没有找到可以导出的Excel！！！");
-            }
-            else
-            {
-                Debug.Log("所有的Excel都导出成功！！！");
-            }
+            result.Sort((a, b) => string.Compare(a.RelativePath, b.RelativePath, StringComparison.Ordinal));
+            return result;
         }
 
         /// <summary>
-        /// 导出Excel表 
+        /// 导出指定目录下所有的 Excel 表
         /// </summary>
-        /// <param name="_excelName"></param>
-        public static void ExportExcel(string _excelName)
+        public static void ExportAll(string excelFolderPath, string txtOutputPath)
         {
-            string excelPath = GAME_EXCEL_PATH + "/" + _excelName;
+            List<string> excelFiles = GetExcelFileList(excelFolderPath);
+            if (excelFiles.Count == 0)
+            {
+                Debug.LogError("没有找到可以导出的Excel！！！");
+                return;
+            }
 
-            IWorkbook workbook = CreatWrokbook(excelPath);
-            ISheet sheet = null;
-            IRow row = null;
+            string excelRoot = ToAbsolutePath(excelFolderPath);
+            string txtRoot = EnsureDirectory(txtOutputPath);
+
+            for (int i = 0; i < excelFiles.Count; i++)
+            {
+                ExportExcelFile(Path.Combine(excelRoot, excelFiles[i]), txtRoot);
+            }
+
+            Debug.Log("所有的Excel都导出成功！！！");
+        }
+
+        /// <summary>
+        /// 导出单个 Excel 文件内的全部页签
+        /// </summary>
+        public static void ExportExcelFile(string excelFilePath, string txtOutputPath)
+        {
+            string txtRoot = EnsureDirectory(txtOutputPath);
+            IWorkbook workbook = CreatWrokbook(excelFilePath);
+
             for (int i = 0; i < workbook.NumberOfSheets; i++)
             {
-                using (FileStream fs = File.Open(GAME_TXT_PATH + "/" + workbook.GetSheetName(i) + ".txt", FileMode.Create, FileAccess.Write))
+                ExportSheet(workbook.GetSheetAt(i), Path.Combine(txtRoot, workbook.GetSheetName(i) + ".txt"));
+            }
+
+            Debug.Log("导出 " + Path.GetFileName(excelFilePath) + " 成功！！！");
+        }
+
+        /// <summary>
+        /// 导出 Excel 文件内的单个页签
+        /// </summary>
+        public static void ExportExcelSheet(string excelFilePath, string sheetName, string txtOutputPath)
+        {
+            string txtRoot = EnsureDirectory(txtOutputPath);
+            IWorkbook workbook = CreatWrokbook(excelFilePath);
+            ISheet sheet = workbook.GetSheet(sheetName);
+
+            if (sheet == null)
+            {
+                Debug.LogError($"页签不存在: {Path.GetFileName(excelFilePath)} / {sheetName}");
+                return;
+            }
+
+            ExportSheet(sheet, Path.Combine(txtRoot, sheetName + ".txt"));
+            Debug.Log($"导出 {Path.GetFileName(excelFilePath)} / {sheetName} 成功！！！");
+        }
+
+        private static void ExportSheet(ISheet sheet, string txtFilePath)
+        {
+            if (sheet == null)
+            {
+                return;
+            }
+
+            IRow headerRow = sheet.GetRow(TITLE_START_INDEX);
+            if (headerRow == null)
+            {
+                return;
+            }
+
+            List<int> exportColumnIdxList = new List<int>();
+            for (int k = 0; k <= headerRow.LastCellNum; k++)
+            {
+                ICell headerCell = headerRow.GetCell(k);
+                if (headerCell == null || string.IsNullOrEmpty(headerCell.ToString()))
                 {
-                    using (StreamWriter sw = new StreamWriter(fs, System.Text.Encoding.UTF8))
+                    continue;
+                }
+
+                if (headerCell.ToString().StartsWith(SCRefDataCore.MEMO_COLUMN_PREFIX))
+                {
+                    continue;
+                }
+
+                exportColumnIdxList.Add(k);
+            }
+
+            using (FileStream fs = File.Open(txtFilePath, FileMode.Create, FileAccess.Write))
+            {
+                using (StreamWriter sw = new StreamWriter(fs, System.Text.Encoding.UTF8))
+                {
+                    writeRowCells(sw, headerRow, exportColumnIdxList);
+
+                    for (int j = TITLE_START_INDEX + 1; j <= sheet.LastRowNum; j++)
                     {
-
-                        sheet = workbook.GetSheetAt(i);
-                        if (sheet == null)
-                            continue;
-
-                        IRow headerRow = sheet.GetRow(TITLE_START_INDEX);
-                        if (headerRow == null)
-                            continue;
-
-                        List<int> exportColumnIdxList = new List<int>();
-                        for (int k = 0; k <= headerRow.LastCellNum; k++)
+                        IRow row = sheet.GetRow(j);
+                        if (row == null)
                         {
-                            ICell headerCell = headerRow.GetCell(k);
-                            if (headerCell == null || string.IsNullOrEmpty(headerCell.ToString()))
-                                continue;
-
-                            if (headerCell.ToString().StartsWith(SCRefDataCore.MEMO_COLUMN_PREFIX))
-                                continue;
-
-                            exportColumnIdxList.Add(k);
+                            continue;
                         }
 
-                        writeRowCells(sw, headerRow, exportColumnIdxList);
-
-                        for (int j = TITLE_START_INDEX + 1; j <= sheet.LastRowNum; j++)
-                        {
-                            row = sheet.GetRow(j);
-                            if (row == null)
-                                continue;
-
-                            writeRowCells(sw, row, exportColumnIdxList);
-                        }
+                        writeRowCells(sw, row, exportColumnIdxList);
                     }
                 }
             }
-
-            Debug.Log("导出" + _excelName + "成功！！！");
         }
 
         /// <summary>
@@ -127,12 +244,9 @@ namespace SCFrame.RefData
             _sw.Write("\n");
         }
 
-
         /// <summary>
         /// 创建工作簿
         /// </summary>
-        /// <param name="_excelPath"></param>
-        /// <returns></returns>
         private static IWorkbook CreatWrokbook(string _excelPath)
         {
             using (FileStream stream = File.Open(_excelPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -149,17 +263,21 @@ namespace SCFrame.RefData
         }
 
         /// <summary>
-        /// 复制Txt到StreamingAssets下 因为unity导出运行时读不到resources下的txt
+        /// 复制 Txt 到 StreamingAssets 下，因为 Unity 导出运行时读不到 Resources 下的 txt
         /// </summary>
-        [MenuItem("Excel导出/复制txt到StreamingAssets下")]
-        private static void CopyTxtToStreamingAssets()
+        public static void CopyTxtToStreamingAssets(string txtSourcePath, string streamingAssetsSubFolder = "ExportTxt")
         {
             try
             {
-                string sourcePath = GAME_TXT_PATH;
-                string targetPath = Path.Combine(Application.streamingAssetsPath, "ExportTxt");
+                string sourcePath = ToAbsolutePath(txtSourcePath);
+                string targetPath = Path.Combine(Application.streamingAssetsPath, streamingAssetsSubFolder);
 
-                // 确保目标目录存在
+                if (!Directory.Exists(sourcePath))
+                {
+                    Debug.LogError($"Txt 源目录不存在: {sourcePath}");
+                    return;
+                }
+
                 if (!Directory.Exists(targetPath))
                 {
                     Directory.CreateDirectory(targetPath);
@@ -184,12 +302,32 @@ namespace SCFrame.RefData
                 }
 
                 Debug.Log($"复制完成! 共复制 {copiedCount} 个txt文件");
-                AssetDatabase.Refresh();
             }
             catch (Exception ex)
             {
                 Debug.LogError($"复制过程中发生错误: {ex.Message}");
             }
+        }
+
+        private static string EnsureDirectory(string path)
+        {
+            string absolute = ToAbsolutePath(path);
+            if (!Directory.Exists(absolute))
+            {
+                Directory.CreateDirectory(absolute);
+            }
+            return absolute;
+        }
+
+        private static string ToAbsolutePath(string path)
+        {
+            if (Path.IsPathRooted(path))
+            {
+                return path.Replace('\\', '/');
+            }
+
+            string projectRoot = Path.GetDirectoryName(Application.dataPath);
+            return Path.Combine(projectRoot, path).Replace('\\', '/');
         }
     }
 }
